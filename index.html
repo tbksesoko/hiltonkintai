@@ -41,7 +41,7 @@ function subMonth(){
 
 function draw(){
   if (staff === undefined) return;
-  if (!staff){ notice("このリンクは無効です", "リンクが古いか、従業員の登録が削除されています。管理者に確認してください。", true); return; }
+  if (!staff){ notice("このリンクは無効です", "管理者に確認してください。", true); return; }
   const key = ym;
   if (builtKey !== key){
     app.innerHTML = `
@@ -65,7 +65,7 @@ function draw(){
     </div>
     <div class="actions">${sub ? `<button id="unsub">申請を取り消して修正する</button>`
       : `<button class="primary" id="subm" ${s.days ? "" : "disabled"}>${ymLabel(ym)}分を申請する</button>`}</div>
-    ${s.edits ? `<p class="small" style="flex-basis:100%;margin:0;color:var(--edit)">管理者が ${s.edits} 日分の時間を修正しました（「修正」の印がある日）。</p>` : ""}`;
+    ${s.edits ? `<p class="small" style="flex-basis:100%;margin:0;color:var(--edit)">管理者が ${s.edits} 日分の時間を修正しました。</p>` : ""}`;
   const sb = document.getElementById("subm");
   if (sb) sb.onclick = async () => { sb.disabled = true; try { await setStatus(empId, ym, "submitted"); toast("申請しました"); } catch (e) { toast("申請できませんでした"); sb.disabled = false; } };
   const ub = document.getElementById("unsub");
