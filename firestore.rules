@@ -5,7 +5,7 @@ service cloud.firestore {
     // ===== 管理者のメールアドレスをここに入れてください（複数可） =====
     function isAdmin() {
       return request.auth != null
-        && request.auth.token.email in ['tbksesoko123@gmail.com'];
+        && request.auth.token.email in ['admin@example.com'];
     }
 
     function staffExists(empId) {
