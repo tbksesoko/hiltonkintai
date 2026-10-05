@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>出勤時間申請 管理画面</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@500;700&family=Noto+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body>
+<div class="wrap" id="app"><div class="notice"><b>読み込み中…</b></div></div>
+<div class="toast" id="toast" hidden></div>
+
+<script type="module">
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { collection, doc, onSnapshot, query, where, setDoc, updateDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { configured, fbApp, db, thisYM, shiftYM, ymLabel, summarize, fmt, esc, statusPill, buildSheet, fillSheet, setStatus, downloadExcel, toast } from "./common.js";
+
+const app = document.getElementById("app");
+const S = { ym: thisYM(), staff: {}, months: {}, staffLoaded: false, tab: "sheet", sel: null, email: "" };
+let unsubStaff = null, unsubMonths = null, builtKey = "";
+
+function notice(title, body, warn){
+  app.innerHTML = `<div class="notice${warn ? " warn" : ""}"><b>${esc(title)}</b>${body ? `<span class="muted small">${esc(body)}</span>` : ""}</div>`;
+}
+
+if (!configured) notice("Firebaseの設定がまだです", "firebase-config.js に Firebase の設定を貼り付けてください。", true);
+else {
+  const auth = getAuth(fbApp);
+  onAuthStateChanged(auth, u => {
+    [unsubStaff, unsubMonths].forEach(f => f && f()); unsubStaff = unsubMonths = null;
+    if (!u) return drawLogin(auth);
+    S.email = u.email || "";
+    unsubStaff = onSnapshot(collection(db, "staff"), sn => {
+      S.staff = {}; sn.docs.forEach(d => S.staff[d.id] = d.data()); S.staffLoaded = true; draw();
+    }, e => {
+      notice("このアカウントには管理者の権限がありません", "Firestore のルールに、このメールアドレス（" + S.email + "）が管理者として登録されているか確認してください。", true);
+      app.insertAdjacentHTML("beforeend", `<div><button id="out">ログアウト</button></div>`);
+      document.getElementById("out").onclick = () => signOut(auth);
+    });
+    subMonths();
+    window.__logout = () => signOut(auth);
+  });
+}
+
+function drawLogin(auth){
+  app.innerHTML = `
+    <header class="top"><div class="who"><span class="eyebrow">管理画面</span><h1>出勤時間申請</h1></div></header>
+    <form class="login panel" id="lf">
+      <label>メールアドレス<input type="email" id="em" autocomplete="username" required></label>
+      <label>パスワード<input type="password" id="pw" autocomplete="current-password" required></label>
+      <button class="primary" type="submit">ログイン</button>
+      <span class="err" id="le"></span>
+    </form>`;
+  document.getElementById("lf").onsubmit = async e => {
+    e.preventDefault();
+    const le = document.getElementById("le"); le.textContent = "";
+    try { await signInWithEmailAndPassword(auth, document.getElementById("em").value.trim(), document.getElementById("pw").value); }
+    catch (err){ le.textContent = "ログインできませんでした。メールアドレスとパスワードを確認してください。"; }
+  };
+}
+
+function subMonths(){
+  if (unsubMonths) unsubMonths();
+  S.months = {}; builtKey = "";
+  unsubMonths = onSnapshot(query(collection(db, "months"), where("ym", "==", S.ym)), sn => {
+    S.months = {}; sn.docs.forEach(d => { const v = d.data(); S.months[v.empId] = v; }); draw();
+  }, () => {});
+}
+function staffList(){
+  return Object.entries(S.staff).map(([id, v]) => ({ id, ...v }))
+    .sort((a, b) => (!a.no) - (!b.no) || String(a.no || "").localeCompare(String(b.no || ""), "ja", { numeric: true }) || String(a.name).localeCompare(String(b.name), "ja"));
+}
+function linkFor(id){ return new URL("index.html?id=" + id, location.href).href; }
+function moveMonth(k){ S.ym = shiftYM(S.ym, k); subMonths(); draw(); }
+
+function draw(){
+  if (S.sel && S.tab === "sheet" && S.staff[S.sel]) return drawDetail();
+  builtKey = "";
+  const list = staffList();
+  const head = `
+    <header class="top">
+      <div class="who"><span class="eyebrow">管理画面 ・ ${esc(S.email)} <button class="back small" id="logout" style="margin-left:6px">ログアウト</button></span><h1>出勤時間申請</h1></div>
+      ${S.tab === "sheet" ? `<div class="monthnav"><button class="icon" id="prev" aria-label="前の月">‹</button><span class="label">${ymLabel(S.ym)}</span><button class="icon" id="next" aria-label="次の月">›</button></div>` : ""}
+    </header>
+    <nav class="tabs" role="tablist">
+      <button role="tab" id="tabSheet" aria-selected="${S.tab === "sheet"}">勤務表</button>
+      <button role="tab" id="tabStaff" aria-selected="${S.tab === "staff"}">従業員と専用リンク</button>
+    </nav>`;
+  let body;
+  if (S.tab === "sheet"){
+    let tot = 0, subd = 0;
+    const rows = list.map(p => {
+      const m = S.months[p.id], s = summarize(m); tot += s.total; if (m && m.status === "submitted") subd++;
+      return `<div class="row click" data-id="${esc(p.id)}" tabindex="0" role="button">
+        <span class="no">${p.no ? esc(p.no) : "—"}</span><span class="nm">${esc(p.name)}</span>
+        <span class="meta"><span class="small muted num">${s.days}日</span><span class="num">${fmt(s.total) || "0:00"}</span>${s.edits ? '<span class="pill edit">修正 ' + s.edits + "</span>" : ""}${statusPill(m)}</span>
+      </div>`;
+    }).join("");
+    body = `
+      <section class="panel summary">
+        <div class="stats">
+          <div class="stat"><b>${subd} / ${list.length}</b><span>申請済の人数</span></div>
+          <div class="stat"><b>${fmt(tot) || "0:00"}</b><span>勤務時間 合計</span></div>
+        </div>
+        <div class="actions"><button class="primary" id="dlAll" ${list.length ? "" : "disabled"}>${ymLabel(S.ym)}分をExcelでダウンロード</button></div>
+      </section>
+      <section class="panel list">${!S.staffLoaded ? '<div class="empty">読み込み中…</div>' : list.length ? rows
+        : '<div class="empty">従業員がまだ登録されていません。「従業員と専用リンク」タブで追加すると、各自の入力ページのリンクが発行されます。</div>'}</section>`;
+  } else {
+    body = `
+      <section class="panel" style="display:grid;gap:12px">
+        <h2>従業員を追加</h2>
+        <form class="add" id="addForm">
+          <label>社員番号<input type="text" id="newNo" inputmode="numeric" autocomplete="off"></label>
+          <label>名前<input type="text" id="newName" required autocomplete="off"></label>
+          <button class="primary" type="submit">追加してリンクを発行</button>
+        </form>
+      </section>
+      <section class="panel list">${list.length ? list.map(p => `
+        <div class="row" data-id="${esc(p.id)}">
+          <span class="no"><input type="text" class="noin" id="no-${esc(p.id)}" value="${esc(p.no || "")}" placeholder="未入力" inputmode="numeric" autocomplete="off" aria-label="${esc(p.name)}さんの社員番号"></span><span class="nm">${esc(p.name)}</span>
+          <span class="meta"><button class="ghost danger del">削除</button></span>
+          <div class="linkbox"><input type="text" readonly value="${esc(linkFor(p.id))}" aria-label="${esc(p.name)}さんの専用リンク"><button class="copy">リンクをコピー</button></div>
+        </div>`).join("") : '<div class="empty">まだ誰も登録されていません。上のフォームから追加してください。</div>'}</section>`;
+  }
+  // 入力途中の欄は再描画しても値とカーソルを保つ
+  const ae = document.activeElement;
+  const keep = { no: document.getElementById("newNo")?.value || "", name: document.getElementById("newName")?.value || "",
+    focus: ae && ae.id, val: ae && ae.classList && ae.classList.contains("noin") ? ae.value : null };
+  app.innerHTML = head + body;
+  if (document.getElementById("newNo")){ document.getElementById("newNo").value = keep.no; document.getElementById("newName").value = keep.name; }
+  const fe = keep.focus && document.getElementById(keep.focus);
+  if (fe && fe.tagName === "INPUT"){ if (keep.val != null) fe.value = keep.val; fe.focus(); }
+  document.getElementById("logout").onclick = () => window.__logout();
+  document.getElementById("tabSheet").onclick = () => { S.tab = "sheet"; S.sel = null; draw(); };
+  document.getElementById("tabStaff").onclick = () => { S.tab = "staff"; S.sel = null; draw(); };
+  const pv = document.getElementById("prev");
+  if (pv){ pv.onclick = () => moveMonth(-1); document.getElementById("next").onclick = () => moveMonth(1); }
+  app.querySelectorAll(".row.click").forEach(r => {
+    const go = () => { S.sel = r.dataset.id; draw(); };
+    r.onclick = go; r.onkeydown = e => { if (e.key === "Enter" || e.key === " "){ e.preventDefault(); go(); } };
+  });
+  const da = document.getElementById("dlAll"); if (da) da.onclick = () => downloadExcel(staffList(), S.months, S.ym);
+  const f = document.getElementById("addForm");
+  if (f) f.onsubmit = async e => {
+    e.preventDefault();
+    const no = document.getElementById("newNo").value.trim(), name = document.getElementById("newName").value.trim();
+    if (!name) return;
+    if (no && staffList().some(p => String(p.no) === no)){ toast("その社員番号はすでに登録されています"); return; }
+    const chars = "abcdefghjkmnpqrstuvwxyz23456789";
+    const id = "s-" + Array.from(crypto.getRandomValues(new Uint8Array(10)), b => chars[b % chars.length]).join("");
+    try {
+      await setDoc(doc(db, "staff", id), { no, name, createdAt: new Date().toISOString() });
+      document.getElementById("newNo").value = ""; document.getElementById("newName").value = "";
+      toast(name + "さんを追加しました");
+    } catch (err){ toast("追加できませんでした"); }
+  };
+  app.querySelectorAll(".noin").forEach(inp => {
+    inp.onkeydown = e => { if (e.key === "Enter"){ e.preventDefault(); inp.blur(); } };
+    inp.onchange = async () => {
+      const id = inp.closest(".row").dataset.id, no = inp.value.trim();
+      if (no === String(S.staff[id]?.no || "")) return;
+      if (no && staffList().some(p => p.id !== id && String(p.no) === no)){ toast("その社員番号はすでに登録されています"); inp.value = S.staff[id]?.no || ""; return; }
+      try { await updateDoc(doc(db, "staff", id), { no }); toast(no ? "社員番号を保存しました" : "社員番号を空欄にしました"); }
+      catch (e){ toast("保存できませんでした"); inp.value = S.staff[id]?.no || ""; }
+    };
+  });
+  app.querySelectorAll(".copy").forEach(b => b.onclick = () => {
+    const inp = b.previousElementSibling;
+    navigator.clipboard.writeText(inp.value).then(() => toast("リンクをコピーしました"), () => { inp.select(); toast("リンクを選択しました。コピーしてください"); });
+  });
+  app.querySelectorAll(".del").forEach(b => b.onclick = async () => {
+    const id = b.closest(".row").dataset.id;
+    if (b.dataset.armed !== "1"){ b.dataset.armed = "1"; b.textContent = "本当に削除する"; setTimeout(() => { if (b.isConnected){ b.dataset.armed = ""; b.textContent = "削除"; } }, 4000); return; }
+    try { await deleteDoc(doc(db, "staff", id)); toast("削除しました（入力済みの勤務データは残ります）"); } catch (e){ toast("削除できませんでした"); }
+  });
+}
+
+function drawDetail(){
+  const p = { id: S.sel, ...S.staff[S.sel] }, m = S.months[p.id] || null;
+  const key = p.id + "_" + S.ym;
+  if (builtKey !== key){
+    app.innerHTML = `
+      <div><button class="back" id="back">← 一覧に戻る</button></div>
+      <header class="top">
+        <div class="who"><span class="eyebrow">管理者として修正中</span><h1>${esc(p.name)}</h1><span class="idno">社員番号 ${p.no ? esc(p.no) : "未入力"}</span></div>
+        <div class="monthnav"><button class="icon" id="prev" aria-label="前の月">‹</button><span class="label">${ymLabel(S.ym)}</span><button class="icon" id="next" aria-label="次の月">›</button></div>
+      </header>
+      <section class="panel summary" id="sum"></section>
+      <section id="sheet"></section>`;
+    document.getElementById("back").onclick = () => { S.sel = null; draw(); };
+    document.getElementById("prev").onclick = () => moveMonth(-1);
+    document.getElementById("next").onclick = () => moveMonth(1);
+    buildSheet(document.getElementById("sheet"), p.id, S.ym, true);
+    builtKey = key;
+  }
+  const s = summarize(m);
+  document.getElementById("sum").innerHTML = `
+    <div class="stats">
+      <div class="stat"><b>${fmt(s.total) || "0:00"}</b><span>勤務時間 合計</span></div>
+      <div class="stat"><b>${s.days}</b><span>出勤日数</span></div>
+      <div class="stat"><span style="margin-bottom:4px">状態</span>${statusPill(m)}</div>
+    </div>
+    <div class="actions">
+      ${m && m.status === "submitted" ? `<button id="reopen">差し戻す</button>` : ""}
+      <button class="primary" id="dlOne">この人のExcelをダウンロード</button>
+    </div>`;
+  const ro = document.getElementById("reopen");
+  if (ro) ro.onclick = async () => { ro.disabled = true; try { await setStatus(p.id, S.ym, "draft"); toast("差し戻しました。本人が再度修正できます"); } catch (e){ toast("差し戻せませんでした"); ro.disabled = false; } };
+  document.getElementById("dlOne").onclick = () => downloadExcel([p], S.months, S.ym);
+  fillSheet(document.getElementById("sheet"), m, false, true);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,49 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===== 管理者のメールアドレスをここに入れてください（複数可） =====
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.email in ['tbksesoko123@gmail.com'];
+    }
+
+    function staffExists(empId) {
+      return exists(/databases/$(database)/documents/staff/$(empId));
+    }
+
+    // 従業員の登録：1件ずつの読み取りは誰でも可（専用リンクのID）、一覧と変更は管理者のみ
+    match /staff/{empId} {
+      allow get: if true;
+      allow list, write: if isAdmin();
+    }
+
+    // 月ごとの勤務表：ドキュメントID = 従業員ID_YYYY-MM
+    match /months/{key} {
+      allow get: if true;
+      allow list, delete: if isAdmin();
+
+      // 従業員：自分の月の表を新しく作る
+      allow create: if isAdmin() || (
+        staffExists(request.resource.data.empId)
+        && key == request.resource.data.empId + '_' + request.resource.data.ym
+        && request.resource.data.status == 'draft'
+      );
+
+      // 従業員：入力中は時間の入力と申請ができる／申請済みは「取り消し」だけできる
+      allow update: if isAdmin() || (
+        staffExists(resource.data.empId)
+        && request.resource.data.empId == resource.data.empId
+        && request.resource.data.ym == resource.data.ym
+        && (
+          (resource.data.status != 'submitted'
+            && request.resource.data.status in ['draft', 'submitted'])
+          ||
+          (resource.data.status == 'submitted'
+            && request.resource.data.status == 'draft'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']))
+        )
+      );
+    }
+  }
+}

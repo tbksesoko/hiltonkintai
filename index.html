@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>出勤時間</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@500;700&family=Noto+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap" id="app"><div class="notice"><b>読み込み中…</b></div></div>
+<div class="toast" id="toast" hidden></div>
+
+<script type="module">
+import { doc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { configured, db, thisYM, shiftYM, ymLabel, summarize, fmt, esc, statusPill, buildSheet, fillSheet, setStatus, toast } from "./common.js";
+
+const app = document.getElementById("app");
+const empId = new URLSearchParams(location.search).get("id") || "";
+let ym = thisYM(), staff, month = null, builtKey = "", unsubMonth = null;
+
+function notice(title, body, warn){
+  app.innerHTML = `<div class="notice${warn ? " warn" : ""}"><b>${esc(title)}</b>${body ? `<span class="muted small">${esc(body)}</span>` : ""}</div>`;
+}
+
+if (!configured) notice("Firebaseの設定がまだです", "firebase-config.js に Firebase の設定を貼り付けてください。", true);
+else if (!/^s-[a-z0-9]+$/.test(empId)) notice("従業員用のリンクから開いてください", "管理者から受け取った、あなた専用のリンクを開くと出勤時間を入力できます。");
+else {
+  onSnapshot(doc(db, "staff", empId), sn => { staff = sn.exists() ? sn.data() : null; builtKey = ""; draw(); },
+    () => notice("データを読み込めません", "通信状態を確認して、ページを再読み込みしてください。", true));
+  subMonth();
+}
+
+function subMonth(){
+  if (unsubMonth) unsubMonth();
+  month = null; builtKey = "";
+  unsubMonth = onSnapshot(doc(db, "months", empId + "_" + ym), sn => { month = sn.exists() ? sn.data() : null; draw(); }, () => {});
+}
+
+function draw(){
+  if (staff === undefined) return;
+  if (!staff){ notice("このリンクは無効です", "リンクが古いか、従業員の登録が削除されています。管理者に確認してください。", true); return; }
+  const key = ym;
+  if (builtKey !== key){
+    app.innerHTML = `
+      <header class="top">
+        <div class="who"><span class="eyebrow">出勤時間</span><h1>${esc(staff.name)}</h1>${staff.no ? `<span class="idno">社員番号 ${esc(staff.no)}</span>` : ""}</div>
+        <div class="monthnav"><button class="icon" id="prev" aria-label="前の月">‹</button><span class="label">${ymLabel(ym)}</span><button class="icon" id="next" aria-label="次の月">›</button></div>
+      </header>
+      <section class="panel summary" id="sum"></section>
+      <section id="sheet"></section>`;
+    document.getElementById("prev").onclick = () => { ym = shiftYM(ym, -1); subMonth(); draw(); };
+    document.getElementById("next").onclick = () => { ym = shiftYM(ym, 1); subMonth(); draw(); };
+    buildSheet(document.getElementById("sheet"), empId, ym, false);
+    builtKey = key;
+  }
+  const s = summarize(month), sub = month && month.status === "submitted";
+  document.getElementById("sum").innerHTML = `
+    <div class="stats">
+      <div class="stat"><b>${fmt(s.total) || "0:00"}</b><span>勤務時間 合計</span></div>
+      <div class="stat"><b>${s.days}</b><span>出勤日数</span></div>
+      <div class="stat"><span style="margin-bottom:4px">状態</span>${statusPill(month)}</div>
+    </div>
+    <div class="actions">${sub ? `<button id="unsub">申請を取り消して修正する</button>`
+      : `<button class="primary" id="subm" ${s.days ? "" : "disabled"}>${ymLabel(ym)}分を申請する</button>`}</div>
+    ${s.edits ? `<p class="small" style="flex-basis:100%;margin:0;color:var(--edit)">管理者が ${s.edits} 日分の時間を修正しました（「修正」の印がある日）。</p>` : ""}`;
+  const sb = document.getElementById("subm");
+  if (sb) sb.onclick = async () => { sb.disabled = true; try { await setStatus(empId, ym, "submitted"); toast("申請しました"); } catch (e) { toast("申請できませんでした"); sb.disabled = false; } };
+  const ub = document.getElementById("unsub");
+  if (ub) ub.onclick = async () => { ub.disabled = true; try { await setStatus(empId, ym, "draft"); toast("申請を取り消しました"); } catch (e) { toast("取り消せませんでした"); ub.disabled = false; } };
+  fillSheet(document.getElementById("sheet"), month, !!sub, false);
+}
+</script>
+</body>
+</html>
