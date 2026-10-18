@@ -16,6 +16,7 @@
 <script type="module">
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { collection, doc, onSnapshot, query, where, setDoc, updateDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { downloadPdfZip } from "./pdf-export.js";
 import { configured, fbApp, db, thisYM, shiftYM, ymLabel, summarize, fmt, esc, statusPill, buildSheet, fillSheet, setStatus, downloadExcel, toast } from "./common.js";
 
 const app = document.getElementById("app");
@@ -105,7 +106,7 @@ function draw(){
           <div class="stat"><b>${subd} / ${list.length}</b><span>申請済の人数</span></div>
           <div class="stat"><b>${fmt(tot) || "0:00"}</b><span>勤務時間 合計</span></div>
         </div>
-        <div class="actions"><button class="primary" id="dlAll" ${list.length ? "" : "disabled"}>${ymLabel(S.ym)}分をExcelでダウンロード</button></div>
+        <div class="actions"><button class="primary" id="dlAll" ${list.length ? "" : "disabled"}>${ymLabel(S.ym)}分をExcelでダウンロード</button><button id="dlPdf" ${list.length ? "" : "disabled"}>PDFで一括ダウンロード</button></div>
       </section>
       <section class="panel list">${!S.staffLoaded ? '<div class="empty">読み込み中…</div>' : list.length ? rows
         : '<div class="empty">従業員がまだ登録されていません。「従業員と専用リンク」タブで追加すると、各自の入力ページのリンクが発行されます。</div>'}</section>`;
@@ -144,6 +145,15 @@ function draw(){
     r.onclick = go; r.onkeydown = e => { if (e.key === "Enter" || e.key === " "){ e.preventDefault(); go(); } };
   });
   const da = document.getElementById("dlAll"); if (da) da.onclick = () => downloadExcel(staffList(), S.months, S.ym);
+  const dp = document.getElementById("dlPdf");
+  if (dp) dp.onclick = async () => {
+    dp.disabled = true; const label = dp.textContent;
+    try {
+      await downloadPdfZip(staffList(), S.months, S.ym, (i, n) => { dp.textContent = `PDFを作成中… ${i}/${n}`; });
+      toast("PDFをダウンロードしました");
+    } catch (e){ console.error(e); toast("PDFを作成できませんでした"); }
+    finally { if (dp.isConnected){ dp.disabled = false; dp.textContent = label; } }
+  };
   const f = document.getElementById("addForm");
   if (f) f.onsubmit = async e => {
     e.preventDefault();
